@@ -1,0 +1,636 @@
+{
+  "name": "ai-invoice-finance-ops-automation",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "includeSpamTrash": false,
+          "labelIds": [
+            "INBOX"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -2432,
+        48
+      ],
+      "id": "bb3490ac-92cf-452d-a0bc-95a69195782f",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "mGRlfUTH4l1NC5jY",
+          "name": "Gmail account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d1a0310c-9ed9-42b1-b0c0-cf9282579723",
+              "leftValue": "={{ $json.Subject.toLowerCase() }}",
+              "rightValue": "invoice",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "0a5062ae-4810-45ca-ab63-512a2e590153",
+              "leftValue": "={{ $json.Subject }}",
+              "rightValue": "payment",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "3f6adda1-9cd4-45df-bfa5-401e97028560",
+              "leftValue": "={{ $json.Subject }}",
+              "rightValue": "bill",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "95b40cd2-e2c5-4f4d-8518-b90c0fe064d3",
+              "leftValue": "={{ $json.snippet.toLowerCase() }}",
+              "rightValue": "invoice",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        -2208,
+        48
+      ],
+      "id": "8e3d89e1-9de6-4199-a642-75699b30eb2b",
+      "name": "Filter only invoices, not all emails"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.1,\n  \"max_tokens\": 600,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a financial data extraction assistant. Extract invoice details from the email content provided. Be smart — if the invoice number appears in the subject line, use it. If amount appears anywhere in the email, extract it. Return ONLY valid JSON with these exact keys, no extra text, no markdown backticks:\\n{\\n  \\\"vendor_name\\\": \\\"company or person who sent the invoice\\\",\\n  \\\"invoice_number\\\": \\\"invoice or reference number — check subject line too\\\",\\n  \\\"invoice_date\\\": \\\"date on the invoice — if not found use today\\\",\\n  \\\"due_date\\\": \\\"payment due date — if not found use 30 days from today\\\",\\n  \\\"total_amount\\\": \\\"total amount as a number — look everywhere in email\\\",\\n  \\\"currency\\\": \\\"USD if not specified\\\",\\n  \\\"line_items\\\": \\\"brief summary of what was invoiced\\\",\\n  \\\"urgency\\\": \\\"urgent if due within 5 days, otherwise normal\\\"\\n}\\nNEVER use the phrase not found. Make a reasonable guess or use unknown.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"={{ 'Extract invoice data from this email:\\\\n\\\\nSubject: ' + ($json.Subject || 'unknown') + '\\\\nFrom: ' + ($json.From || 'unknown') + '\\\\nBody: ' + ($json.text || $json.snippet || 'no body text') }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1776,
+        48
+      ],
+      "id": "8e19bbb7-ff0d-4ceb-a6b3-2eff8c9aa639",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "0DcW89UBjD4xU1q2",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst rawText = response.choices[0].message.content;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(rawText);\n} catch (e) {\n  const match = rawText.match(/\\{[\\s\\S]*\\}/);\n  if (!match) throw new Error(\"No JSON in Groq response\");\n  parsed = JSON.parse(match[0]);\n}\n\nconst email = $('Gmail Trigger').first().json;\n\nconst fromText = email.From || \"\";\nconst emailMatch = fromText.match(/<([^>]+)>/) || fromText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);\nconst extractedSenderEmail = emailMatch\n  ? (emailMatch[1] || emailMatch[0])\n  : \"\";\n\nreturn [{\n  json: {\n    vendor_name: parsed.vendor_name || \"not found\",\n    invoice_number: parsed.invoice_number || \"not found\",\n    invoice_date: parsed.invoice_date || \"not found\",\n    due_date: parsed.due_date || \"not found\",\n    total_amount: parsed.total_amount ?? 0,\n    currency: parsed.currency || \"USD\",\n    line_items: parsed.line_items || \"not found\",\n    urgency: parsed.urgency || \"normal\",\n    sender_email: extractedSenderEmail,\n    email_subject: email.Subject || \"not found\",\n    received_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1536,
+        48
+      ],
+      "id": "1c5fc365-d4ea-46af-b94c-e7eda70ec2ce",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1PzjmpKcqS9Gkt0ONUFeI__c8rrEPrRg3ih34wOMSa7c",
+          "mode": "list",
+          "cachedResultName": "Under",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1PzjmpKcqS9Gkt0ONUFeI__c8rrEPrRg3ih34wOMSa7c/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1918763156,
+          "mode": "list",
+          "cachedResultName": "Sheet2",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1PzjmpKcqS9Gkt0ONUFeI__c8rrEPrRg3ih34wOMSa7c/edit#gid=1918763156"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Vendor": "={{ $json.vendor_name }}",
+            "Invoice": "={{ $json.invoice_number }}",
+            "DueDate": "={{ $json.due_date }}",
+            "InvoiceDate": "={{ $json.invoice_date }}",
+            "Amount": "={{ $json.total_amount }}",
+            "Currency": "={{ $json.currency }}",
+            "LineItems": "={{ $json.line_items }}",
+            "Urgency": "={{ $json.urgency }}",
+            "Sender": "={{ $json.sender_email }}",
+            "ReceivedAt": "={{ $json.received_at }}"
+          },
+          "matchingColumns": [
+            "Invoice"
+          ],
+          "schema": [
+            {
+              "id": "Vendor",
+              "displayName": "Vendor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Invoice",
+              "displayName": "Invoice",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "InvoiceDate",
+              "displayName": "InvoiceDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "DueDate",
+              "displayName": "DueDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Amount",
+              "displayName": "Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Currency",
+              "displayName": "Currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "LineItems",
+              "displayName": "LineItems",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Urgency",
+              "displayName": "Urgency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Sender",
+              "displayName": "Sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ReceivedAt",
+              "displayName": "ReceivedAt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -1296,
+        48
+      ],
+      "id": "9d387c74-1ac1-48cd-b64f-b95fea8e1937",
+      "name": "Append or update row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "vjI5a3n83bDQYOqe",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "6df6fa8c-cb6c-404c-b7ed-0413f3ff3da3",
+              "leftValue": "={{ $json.Urgency }}",
+              "rightValue": "=urgent",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1024,
+        192
+      ],
+      "id": "0ecf6b5e-157f-42f8-a342-af3e87776d95",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "finance-alerts",
+          "mode": "name"
+        },
+        "text": "=URGENT INVOICE — Action Required  Vendor: {{ $json.Vendor }} Invoice #: {{ $json.Invoice }} Amount: {{ $json.Currency }} {{ $json.Amount }} Due: {{ $json.DueDate }} From: {{ $json.Sender }} Please review and approve immediately.",
+        "otherOptions": {
+          "link_names": true
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        -768,
+        96
+      ],
+      "id": "b356c684-0895-4d15-98e8-bf0c27c84fe5",
+      "name": "Send a message",
+      "webhookId": "875cf709-251a-48c3-942f-09681e15d3a6",
+      "credentials": {
+        "slackApi": {
+          "id": "jBMr2NTt68t5utLO",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "finance-alerts",
+          "mode": "name"
+        },
+        "text": "=New invoice received  Vendor: {{ $json.Vendor }} Invoice #: {{ $json.Invoice }} Amount: {{ $json.Currency }} {{ $json.Amount }} Due: {{ $json.DueDate }}  Logged to Google Sheets. No urgent action needed.",
+        "otherOptions": {
+          "link_names": true
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        -752,
+        320
+      ],
+      "id": "2396cf05-1fcc-4442-ae49-5f68a4bab65d",
+      "name": "Send a message1",
+      "webhookId": "862bec40-1831-44f3-8b01-124090546c1a",
+      "credentials": {
+        "slackApi": {
+          "id": "jBMr2NTt68t5utLO",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.Sender }}",
+        "subject": "=Invoice received — {{$json.Invoice}}",
+        "emailType": "text",
+        "message": "=Hi,\n\nThank you — we have received your invoice {{$json.Invoice}} for {{$json.Currency}} {{$json.Amount}}.\n\nIt has been logged in our system and is under review. We will process it by {{$json.DueDate}}.\n\nBest regards,\nFinance Team",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -768,
+        -128
+      ],
+      "id": "5e78a651-1a8c-4ed2-b790-8d89e2126975",
+      "name": "Send a message2",
+      "webhookId": "c90709e5-8922-4515-bb0a-cd507014e2ef",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "mGRlfUTH4l1NC5jY",
+          "name": "Gmail account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5d90dbf5-eb47-4250-bcf2-307a24357ba6",
+              "leftValue": "={{ $json.Subject.toLowerCase() }}",
+              "rightValue": "re:",
+              "operator": {
+                "type": "string",
+                "operation": "notStartsWith"
+              }
+            },
+            {
+              "id": "4bbf06f5-8a76-4ecf-93d8-d0911e030eef",
+              "leftValue": "={{ $json.Subject.toLowerCase() }}",
+              "rightValue": "fwd:",
+              "operator": {
+                "type": "string",
+                "operation": "notStartsWith"
+              }
+            },
+            {
+              "id": "bcdad724-3762-4da1-bde6-1039fc6aec0f",
+              "leftValue": "={{ $json.Subject.toLowerCase() }}",
+              "rightValue": "delivery status notification",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            },
+            {
+              "id": "ac6c504e-e292-4350-8f77-e9ff3ca72fc2",
+              "leftValue": "={{ $json.From.toLowerCase() }}",
+              "rightValue": "mailer-daemon",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            },
+            {
+              "id": "b6208123-ea0b-46f9-b88d-f2e56a4b5edc",
+              "leftValue": "={{ $json.From.toLowerCase() }}",
+              "rightValue": "postmaster",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        -2000,
+        48
+      ],
+      "id": "4ff8d885-e017-42ba-a610-342cb061dc49",
+      "name": "Filter"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d97be1e7-00ee-4893-a102-c49905dc2359",
+              "leftValue": "={{ $json.Sender && $json.Sender.includes('@') && !$json.Sender.toLowerCase().includes('mailer-daemon') && !$json.Sender.toLowerCase().includes('postmaster') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1088,
+        48
+      ],
+      "id": "4ad0c213-0aba-4b40-adfb-d7bb539ba07b",
+      "name": "If1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Filter only invoices, not all emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter only invoices, not all emails": {
+      "main": [
+        [
+          {
+            "node": "Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Append or update row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append or update row in sheet": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        []
+      ]
+    },
+    "Send a message1": {
+      "main": [
+        []
+      ]
+    },
+    "Filter": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "Send a message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "891172eb-59fc-4cd4-90cd-367b956ae49e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d361637f1d70339ec01cb1a27fd403eac27fb61b561b025cd2a653356b47936c"
+  },
+  "id": "Jxt-Ml_8bJd4yvyq-rOZQ",
+  "tags": []
+}
